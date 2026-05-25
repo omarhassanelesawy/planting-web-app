@@ -15,11 +15,13 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
 
 const knex = require('knex');
 
-const dbPath = path.resolve(
-  __dirname,
-  '../..',
-  process.env.DB_PATH || './database.sqlite'
-);
+const rawDbPath = process.env.DB_PATH || './database.sqlite';
+
+// If DB_PATH is absolute (e.g. /data/database.sqlite from Fly.io volume), use it directly.
+// If relative, resolve it relative to the project root (two levels up from src/db/).
+const dbPath = path.isAbsolute(rawDbPath)
+  ? rawDbPath
+  : path.resolve(__dirname, '../..', rawDbPath);
 
 const db = knex({
   client: 'sqlite3',
@@ -50,6 +52,7 @@ async function initDb() {
     console.log('[DB] Created `plants` table.');
   }
   console.log(`[DB] Connected to SQLite database at: ${dbPath}`);
+  console.log(`[DB] DB_PATH env = "${process.env.DB_PATH || '(not set, using default)'}"`);
 }
 
 module.exports = { db, initDb };
