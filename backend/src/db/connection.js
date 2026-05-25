@@ -1,58 +1,81 @@
 /**
  * db/connection.js
  *
- * Initialises the SQLite database using knex + sqlite3.
- * On first run it creates the `plants` table if it does not exist.
+ * Database connection using @libsql/client.
  *
- * Exports a configured knex instance used throughout the app.
- * All queries are async/await compatible.
+ * Supports two modes (auto-selected based on env vars):
+ *
+ *   PRODUCTION (Turso):
+ *     Set TURSO_URL and TURSO_AUTH_TOKEN in your environment.
+ *     e.g. TURSO_URL=libsql://greenthumb-yourname.turso.io
+ *          TURSO_AUTH_TOKEN=eyJh...
+ *
+ *   DEVELOPMENT (local SQLite file):
+ *     Leave TURSO_URL unset — the client opens a local file instead.
+ *     DB_PATH controls the file location (default: ./database.sqlite)
+ *
+ * The exported `db` object exposes:
+ *   db.execute(sql, args?)  → { rows: [...] }   (single statement)
+ *   db.batch(statements)    → array of results   (multiple statements)
+ *
+ * initDb() creates the `plants` table if it doesn't exist.
  */
 
 'use strict';
 
-const path = require('path');
+const path     = require('path');
+const { createClient } = require('@libsql/client');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
 
-const knex = require('knex');
+// ── Connection factory ────────────────────────────────────────────────────────
 
-const rawDbPath = process.env.DB_PATH || './database.sqlite';
-
-// If DB_PATH is absolute (e.g. /data/database.sqlite from Fly.io volume), use it directly.
-// If relative, resolve it relative to the project root (two levels up from src/db/).
-const dbPath = path.isAbsolute(rawDbPath)
-  ? rawDbPath
-  : path.resolve(__dirname, '../..', rawDbPath);
-
-const db = knex({
-  client: 'sqlite3',
-  connection: { filename: dbPath },
-  useNullAsDefault: true,
-  // Prevent knex from opening multiple connections (sqlite3 limitation)
-  pool: { min: 1, max: 1 },
-});
-
-/**
- * Creates the `plants` table if it doesn't exist.
- * Called once at server startup.
- */
-async function initDb() {
-  const exists = await db.schema.hasTable('plants');
-  if (!exists) {
-    await db.schema.createTable('plants', (table) => {
-      table.string('id').primary();                    // UUID
-      table.string('name').notNullable();              // Required
-      table.integer('wateringIntervalDays').notNullable(); // Days between watering
-      table.text('careInstructions').defaultTo('');    // Optional notes
-      table.text('image').defaultTo('');               // URL or Base64
-      table.string('startDate').notNullable();         // ISO date YYYY-MM-DD
-      table.string('lastWateredDate').notNullable();   // ISO date YYYY-MM-DD
-      table.timestamp('createdAt').defaultTo(db.fn.now());
-      table.timestamp('updatedAt').defaultTo(db.fn.now());
-    });
-    console.log('[DB] Created `plants` table.');
+function buildUrl() {
+  // Production: Turso remote database
+  if (process.env.TURSO_URL) {
+    return process.env.TURSO_URL;
   }
-  console.log(`[DB] Connected to SQLite database at: ${dbPath}`);
-  console.log(`[DB] DB_PATH env = "${process.env.DB_PATH || '(not set, using default)'}"`);
+
+  // Development: local SQLite file
+  const rawPath = process.env.DB_PATH || './database.sqlite';
+  const absPath = path.isAbsolute(rawPath)
+    ? rawPath
+    : path.resolve(__dirname, '../..', rawPath);
+
+  // libsql expects "file:/absolute/path"
+  return `file:${absPath}`;
+}
+
+const clientConfig = {
+  url: buildUrl(),
+};
+
+// Only add authToken for remote Turso connections
+if (process.env.TURSO_AUTH_TOKEN) {
+  clientConfig.authToken = process.env.TURSO_AUTH_TOKEN;
+}
+
+const db = createClient(clientConfig);
+
+// ── Schema migration ──────────────────────────────────────────────────────────
+
+async function initDb() {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS plants (
+      id                   TEXT PRIMARY KEY,
+      name                 TEXT NOT NULL,
+      wateringIntervalDays INTEGER NOT NULL,
+      careInstructions     TEXT    DEFAULT '',
+      image                TEXT    DEFAULT '',
+      startDate            TEXT    NOT NULL,
+      lastWateredDate      TEXT    NOT NULL,
+      createdAt            TEXT    NOT NULL,
+      updatedAt            TEXT    NOT NULL
+    )
+  `);
+
+  const mode = process.env.TURSO_URL ? 'Turso (remote)' : 'SQLite (local)';
+  console.log(`[DB] Connected — mode: ${mode}`);
+  console.log(`[DB] URL: ${clientConfig.url}`);
 }
 
 module.exports = { db, initDb };

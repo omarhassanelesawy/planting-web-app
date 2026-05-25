@@ -48,7 +48,8 @@ async function runDailyCheck() {
   console.log(`[Cron] Running daily watering check for ${today}...`);
 
   try {
-    const allPlants = await db('plants').select('*');
+    const result    = await db.execute('SELECT * FROM plants');
+    const allPlants = result.rows;
 
     // Filter: nextWateringDate (lastWateredDate + interval) <= today
     const duePlants = allPlants

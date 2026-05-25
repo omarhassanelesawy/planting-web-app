@@ -2,12 +2,13 @@
  * routes/plants.js
  *
  * REST API endpoints for the `plants` resource.
+ * Uses @libsql/client directly (parameterised SQL).
  *
  * Endpoints:
  *   GET    /api/plants           – list all plants (+ computed fields)
  *   GET    /api/plants/:id       – get one plant
  *   POST   /api/plants           – create a new plant
- *   PUT    /api/plants/:id       – update a plant's editable fields
+ *   PUT    /api/plants/:id       – update editable fields
  *   PUT    /api/plants/:id/water – mark as watered (sets lastWateredDate = today)
  *   DELETE /api/plants/:id       – delete a plant
  *
@@ -18,53 +19,52 @@
 
 'use strict';
 
-const express = require('express');
+const express  = require('express');
 const { v4: uuidv4 } = require('uuid');
-const { db } = require('../db/connection');
+const { db }   = require('../db/connection');
 
 const router = express.Router();
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Returns today's date as an ISO string (YYYY-MM-DD) in local time.
- */
 function todayISO() {
   const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm   = String(d.getMonth() + 1).padStart(2, '0');
-  const dd   = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
+  return [
+    d.getFullYear(),
+    String(d.getMonth() + 1).padStart(2, '0'),
+    String(d.getDate()).padStart(2, '0'),
+  ].join('-');
 }
 
-/**
- * Adds `wateringIntervalDays` days to an ISO date string.
- * @param {string} isoDate – e.g. "2025-05-01"
- * @param {number} days
- * @returns {string} – e.g. "2025-05-08"
- */
 function addDays(isoDate, days) {
   const d = new Date(isoDate);
-  d.setDate(d.getDate() + days);
-  const yyyy = d.getFullYear();
-  const mm   = String(d.getMonth() + 1).padStart(2, '0');
-  const dd   = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
+  d.setDate(d.getDate() + Number(days));
+  return [
+    d.getFullYear(),
+    String(d.getMonth() + 1).padStart(2, '0'),
+    String(d.getDate()).padStart(2, '0'),
+  ].join('-');
+}
+
+/** Adds computed nextWateringDate and isOverdue to a raw DB row. */
+function enrichPlant(row) {
+  const nextWateringDate = addDays(row.lastWateredDate, row.wateringIntervalDays);
+  return {
+    ...row,
+    wateringIntervalDays: Number(row.wateringIntervalDays), // ensure number, not string
+    nextWateringDate,
+    isOverdue: nextWateringDate <= todayISO(),
+  };
 }
 
 /**
- * Enriches a raw DB row with computed fields.
+ * libsql returns rows as objects when using named columns.
+ * This helper converts a ResultSet to a plain array of objects.
  */
-function enrichPlant(plant) {
-  const nextWateringDate = addDays(plant.lastWateredDate, plant.wateringIntervalDays);
-  const isOverdue        = nextWateringDate <= todayISO();
-  return { ...plant, nextWateringDate, isOverdue };
+function toRows(result) {
+  return result.rows;
 }
 
-/**
- * Validates required fields for plant creation.
- * Returns an array of error messages (empty = valid).
- */
 function validatePlantPayload({ name, wateringIntervalDays }) {
   const errors = [];
   if (!name || typeof name !== 'string' || name.trim() === '') {
@@ -80,8 +80,10 @@ function validatePlantPayload({ name, wateringIntervalDays }) {
 // ── GET /api/plants ──────────────────────────────────────────────────────────
 router.get('/', async (_req, res, next) => {
   try {
-    const plants = await db('plants').select('*').orderBy('createdAt', 'desc');
-    res.json(plants.map(enrichPlant));
+    const result = await db.execute(
+      'SELECT * FROM plants ORDER BY createdAt DESC'
+    );
+    res.json(toRows(result).map(enrichPlant));
   } catch (err) {
     next(err);
   }
@@ -90,7 +92,11 @@ router.get('/', async (_req, res, next) => {
 // ── GET /api/plants/:id ──────────────────────────────────────────────────────
 router.get('/:id', async (req, res, next) => {
   try {
-    const plant = await db('plants').where({ id: req.params.id }).first();
+    const result = await db.execute(
+      'SELECT * FROM plants WHERE id = ?',
+      [req.params.id]
+    );
+    const plant = toRows(result)[0];
     if (!plant) return res.status(404).json({ error: 'Plant not found.' });
     res.json(enrichPlant(plant));
   } catch (err) {
@@ -109,12 +115,12 @@ router.post('/', async (req, res, next) => {
       startDate,
     } = req.body;
 
-    // Validation
     const errors = validatePlantPayload({ name, wateringIntervalDays });
     if (errors.length) return res.status(400).json({ errors });
 
-    const today      = todayISO();
-    const resolvedStartDate = startDate || today;
+    const today               = todayISO();
+    const resolvedStartDate   = startDate || today;
+    const now                 = new Date().toISOString();
 
     const newPlant = {
       id:                  uuidv4(),
@@ -123,12 +129,28 @@ router.post('/', async (req, res, next) => {
       careInstructions:    careInstructions || '',
       image:               image || '',
       startDate:           resolvedStartDate,
-      lastWateredDate:     resolvedStartDate, // default: start watering clock from startDate
-      createdAt:           new Date().toISOString(),
-      updatedAt:           new Date().toISOString(),
+      lastWateredDate:     resolvedStartDate,
+      createdAt:           now,
+      updatedAt:           now,
     };
 
-    await db('plants').insert(newPlant);
+    await db.execute(
+      `INSERT INTO plants
+         (id, name, wateringIntervalDays, careInstructions, image, startDate, lastWateredDate, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        newPlant.id,
+        newPlant.name,
+        newPlant.wateringIntervalDays,
+        newPlant.careInstructions,
+        newPlant.image,
+        newPlant.startDate,
+        newPlant.lastWateredDate,
+        newPlant.createdAt,
+        newPlant.updatedAt,
+      ]
+    );
+
     res.status(201).json(enrichPlant(newPlant));
   } catch (err) {
     next(err);
@@ -136,10 +158,11 @@ router.post('/', async (req, res, next) => {
 });
 
 // ── PUT /api/plants/:id ──────────────────────────────────────────────────────
-// Update editable fields: name, wateringIntervalDays, careInstructions, image
 router.put('/:id', async (req, res, next) => {
   try {
-    const existing = await db('plants').where({ id: req.params.id }).first();
+    const existing = toRows(
+      await db.execute('SELECT * FROM plants WHERE id = ?', [req.params.id])
+    )[0];
     if (!existing) return res.status(404).json({ error: 'Plant not found.' });
 
     const {
@@ -151,7 +174,6 @@ router.put('/:id', async (req, res, next) => {
       lastWateredDate,
     } = req.body;
 
-    // Only validate fields that are being updated
     if (name !== undefined && (typeof name !== 'string' || name.trim() === '')) {
       return res.status(400).json({ errors: ['`name` must be a non-empty string.'] });
     }
@@ -162,17 +184,29 @@ router.put('/:id', async (req, res, next) => {
       }
     }
 
-    const updates = { updatedAt: new Date().toISOString() };
-    if (name               !== undefined) updates.name                = name.trim();
-    if (wateringIntervalDays !== undefined) updates.wateringIntervalDays = Number(wateringIntervalDays);
-    if (careInstructions   !== undefined) updates.careInstructions    = careInstructions;
-    if (image              !== undefined) updates.image               = image;
-    if (startDate          !== undefined) updates.startDate           = startDate;
-    if (lastWateredDate    !== undefined) updates.lastWateredDate     = lastWateredDate;
+    // Build dynamic SET clause for only the fields provided
+    const setClauses = [];
+    const values     = [];
 
-    await db('plants').where({ id: req.params.id }).update(updates);
+    if (name               !== undefined) { setClauses.push('name = ?');                values.push(name.trim()); }
+    if (wateringIntervalDays !== undefined) { setClauses.push('wateringIntervalDays = ?'); values.push(Number(wateringIntervalDays)); }
+    if (careInstructions   !== undefined) { setClauses.push('careInstructions = ?');    values.push(careInstructions); }
+    if (image              !== undefined) { setClauses.push('image = ?');               values.push(image); }
+    if (startDate          !== undefined) { setClauses.push('startDate = ?');           values.push(startDate); }
+    if (lastWateredDate    !== undefined) { setClauses.push('lastWateredDate = ?');     values.push(lastWateredDate); }
 
-    const updated = await db('plants').where({ id: req.params.id }).first();
+    setClauses.push('updatedAt = ?');
+    values.push(new Date().toISOString());
+    values.push(req.params.id); // for WHERE clause
+
+    await db.execute(
+      `UPDATE plants SET ${setClauses.join(', ')} WHERE id = ?`,
+      values
+    );
+
+    const updated = toRows(
+      await db.execute('SELECT * FROM plants WHERE id = ?', [req.params.id])
+    )[0];
     res.json(enrichPlant(updated));
   } catch (err) {
     next(err);
@@ -180,19 +214,21 @@ router.put('/:id', async (req, res, next) => {
 });
 
 // ── PUT /api/plants/:id/water ────────────────────────────────────────────────
-// Dedicated "Mark as Watered" endpoint — sets lastWateredDate to today
 router.put('/:id/water', async (req, res, next) => {
   try {
-    const existing = await db('plants').where({ id: req.params.id }).first();
+    const existing = toRows(
+      await db.execute('SELECT * FROM plants WHERE id = ?', [req.params.id])
+    )[0];
     if (!existing) return res.status(404).json({ error: 'Plant not found.' });
 
-    const today = todayISO();
-    await db('plants').where({ id: req.params.id }).update({
-      lastWateredDate: today,
-      updatedAt:       new Date().toISOString(),
-    });
+    await db.execute(
+      'UPDATE plants SET lastWateredDate = ?, updatedAt = ? WHERE id = ?',
+      [todayISO(), new Date().toISOString(), req.params.id]
+    );
 
-    const updated = await db('plants').where({ id: req.params.id }).first();
+    const updated = toRows(
+      await db.execute('SELECT * FROM plants WHERE id = ?', [req.params.id])
+    )[0];
     res.json(enrichPlant(updated));
   } catch (err) {
     next(err);
@@ -202,10 +238,12 @@ router.put('/:id/water', async (req, res, next) => {
 // ── DELETE /api/plants/:id ───────────────────────────────────────────────────
 router.delete('/:id', async (req, res, next) => {
   try {
-    const existing = await db('plants').where({ id: req.params.id }).first();
+    const existing = toRows(
+      await db.execute('SELECT * FROM plants WHERE id = ?', [req.params.id])
+    )[0];
     if (!existing) return res.status(404).json({ error: 'Plant not found.' });
 
-    await db('plants').where({ id: req.params.id }).delete();
+    await db.execute('DELETE FROM plants WHERE id = ?', [req.params.id]);
     res.json({ message: 'Plant deleted successfully.', id: req.params.id });
   } catch (err) {
     next(err);
