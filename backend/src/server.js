@@ -25,17 +25,29 @@ const PORT = process.env.PORT || 5001;
 
 // ── CORS ────────────────────────────────────────────────────────────────────
 // FRONTEND_URL in production = your Vercel URL, e.g. https://greenthumb.vercel.app
-// In development it defaults to http://localhost:3000
+// Strip trailing slashes from env var to prevent mismatch (browsers send origins without slash)
+const normalise = (url) => (url || '').replace(/\/+$/, '');
+
 const allowedOrigins = [
   'http://localhost:3000',
-  ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : []),
+  'http://localhost:5173',
+  ...(process.env.FRONTEND_URL ? [normalise(process.env.FRONTEND_URL)] : []),
 ];
+
+// Also support VERCEL_URL env var (automatically set by Vercel for preview deployments)
+if (process.env.VERCEL_URL) {
+  allowedOrigins.push(`https://${process.env.VERCEL_URL}`);
+}
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (curl, Postman, server-to-server)
+    // Allow requests with no origin (curl, Postman, server-to-server, cron)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
+    // Strip trailing slash from incoming origin before comparing
+    const normOrigin = normalise(origin);
+    if (allowedOrigins.includes(normOrigin)) return callback(null, true);
+    // Allow any *.vercel.app subdomain (covers preview deployment URLs)
+    if (/^https:\/\/[^.]+\.vercel\.app$/.test(normOrigin)) return callback(null, true);
     callback(new Error(`CORS: origin "${origin}" not allowed`));
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
