@@ -1,0 +1,93 @@
+# render.yaml
+#
+# One-click Render deployment configuration for GreenThumb Reminder backend.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# How to use:
+#   1. Push this repo to GitHub
+#   2. Go to render.com → New → Blueprint
+#   3. Connect your GitHub repo
+#   4. Render reads this file and creates the service + disk automatically
+#   5. Add secret env vars (SMTP_PASS etc.) manually in the Render dashboard
+#      after the first deploy (they cannot be committed to source control)
+
+services:
+  - type: web
+    name: greenthumb-api
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    plan: free          # upgrade to 'starter' for always-on (free tier sleeps after 15 min)
+    healthCheckPath: /api/health
+
+    # Persistent disk — stores the SQLite database file
+    # Mount path MUST match DB_PATH in env vars below
+    disk:
+      name: greenthumb-db
+      mountPath: /data
+      sizeGB: 1         # 1 GB is more than enough for SQLite + plant data
+
+    envVars:
+      # Server
+      - key: PORT
+        value: 5001
+      - key: NODE_ENV
+        value: production
+
+      # Database — points to the mounted persistent disk
+      - key: DB_PATH
+        value: /data/database.sqlite
+
+      # Frontend URL — replace with your actual Vercel URL after deploying frontend
+      - key: FRONTEND_URL
+        value: https://your-greenthumb-app.vercel.app  # ← update this
+
+      # Email — add these as secret env vars in the Render dashboard
+      # (do NOT put real credentials in this file)
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        value: your-email@gmail.com                    # ← update in Render dashboard
+      - key: SMTP_PASS
+        sync: false                                    # marks as secret; set in dashboard
+      - key: RECIPIENT_EMAIL
+        value: your-email@gmail.com                    # ← update in Render dashboard
+
+# Cron job — triggers the daily watering check at 8:00 AM UTC
+# Adjust the schedule for your timezone:
+#   8 AM UTC    → "0 8 * * *"
+#   8 AM EST    → "0 13 * * *"  (UTC+5 offset)
+#   8 AM EET    → "0 6 * * *"   (UTC+2 offset)
+#   8 AM GST    → "0 4 * * *"   (UTC+4 offset)
+  - type: cron
+    name: greenthumb-daily-check
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    schedule: "0 8 * * *"    # ← adjust for your timezone
+    startCommand: >
+      node -e "
+        require('dotenv').config();
+        const { runDailyCheck } = require('./src/services/cronService');
+        runDailyCheck().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
+      "
+    envVars:
+      - key: DB_PATH
+        value: /data/database.sqlite
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        value: your-email@gmail.com
+      - key: SMTP_PASS
+        sync: false
+      - key: RECIPIENT_EMAIL
+        value: your-email@gmail.com
+    disk:
+      name: greenthumb-db         # same disk as the web service — shares the SQLite file
+      mountPath: /data
+      sizeGB: 1
