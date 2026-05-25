@@ -60,12 +60,14 @@ async function runDailyCheck() {
       .filter((p) => p.isOverdue);
 
     if (duePlants.length === 0) {
-      console.log('[Cron] No plants need watering today. No email sent.');
-      return;
+      console.log('[Cron] No plants need watering today. Sending all-clear report.');
+    } else {
+      console.log(`[Cron] ${duePlants.length} plant(s) need watering: ${duePlants.map((p) => p.name).join(', ')}`);
     }
 
-    console.log(`[Cron] ${duePlants.length} plant(s) need watering: ${duePlants.map((p) => p.name).join(', ')}`);
-    await sendDailyReport(duePlants);
+    // Always send the report — pass all plants and the due list so the email
+    // can show a full status summary even when everything is on schedule.
+    await sendDailyReport(duePlants, allPlants);
   } catch (err) {
     console.error('[Cron] Error during daily check:', err);
   }
